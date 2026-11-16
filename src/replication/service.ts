@@ -14,6 +14,7 @@
  */
 
 import type { NodeHost } from '../p2p/host.js'
+import type { PeerId } from '@libp2p/interface'
 import { PROTOCOLS, handle, rpc } from '../p2p/protocols.js'
 import type { ClusterView } from '../p2p/announce.js'
 import type { MetadataStore } from '../metadata/store.js'
@@ -94,6 +95,11 @@ export interface ReplicationOpts {
   voters?: string[]
   /** Phase 7: optional monotonic counters surfaced by the /metrics endpoint. */
   counters?: Counters
+  /** Phase 8: Tiered replication options */
+  tierEnabled?: boolean
+  tierRole?: 'relay' | 'leaf' | 'auto'
+  tierScaleThreshold?: number
+  relayRoster?: string[]
 }
 
 interface MetadataCommand {
@@ -160,6 +166,18 @@ export class ReplicationService {
     } else if (hasQuorum) {
       throw new Error('This database belongs to a quorum cluster; METADATA_VOTERS must not be removed')
     }
+    if (this.isRelay && !this.metaLog) {
+      this.metaLog = new MetaLog(store.db)
+    }
+  }
+
+  get isRelay(): boolean {
+    if (this.opts.tierRole === 'relay') return true
+    if (this.opts.tierRole === 'leaf') return false
+    if (this.opts.relayRoster && this.opts.name && this.opts.relayRoster.includes(this.opts.name)) return true
+    const tieredActive = this.opts.tierEnabled || this.cluster.size >= (this.opts.tierScaleThreshold ?? 100)
+    if (!tieredActive) return false
+    return this.cluster.get(this.selfId)?.role === 'anchor' || this.opts.name?.startsWith('anchor') === true || this.opts.name?.startsWith('relay') === true
   }
 
   get isPrimary(): boolean {
@@ -308,9 +326,12 @@ export class ReplicationService {
     if (this.isPrimary) {
       result = this.quorum ? await this.commitIntent(intent) : this.performIntent(intent)
     } else {
-      const primary = this.quorum
+      let primary = this.quorum
         ? this.cluster.all().find((p) => p.name === this.quorum!.leaderId)?.peer
         : this.cluster.primaryPeer()
+      if (!primary && !this.isRelay) {
+        primary = this.cluster.relayPeers(this.opts.relayRoster).find((r) => r.peer)?.peer
+      }
       if (!primary) return { error: 'no primary known yet', code: 'EUNAVAILABLE' }
       try {
         result = await rpc<WriteIntent, WriteResult>(this.node, primary, PROTOCOLS.metaWrite, intent, AbortSignal.timeout(12000))
@@ -738,9 +759,21 @@ export class ReplicationService {
   }
 
   private async pushToAll(msg: PushMsg): Promise<void> {
+    const tieredActive = this.opts.tierEnabled || this.cluster.size >= (this.opts.tierScaleThreshold ?? 100)
+    let targetPeers: PeerId[] = []
+
+    if (tieredActive) {
+      const relays = this.cluster.relayPeers(this.opts.relayRoster)
+      targetPeers = relays.map((r) => r.peer).filter((p): p is PeerId => p !== undefined)
+      if (targetPeers.length === 0) {
+        targetPeers = this.node.getConnections().map((c) => c.remotePeer)
+      }
+    } else {
+      targetPeers = this.node.getConnections().map((c) => c.remotePeer)
+    }
+
     const seen = new Set<string>()
-    for (const conn of this.node.getConnections()) {
-      const peer = conn.remotePeer
+    for (const peer of targetPeers) {
       const id = peer.toString()
       if (seen.has(id)) continue
       seen.add(id)
@@ -748,6 +781,26 @@ export class ReplicationService {
         await rpc<PushMsg, PushResp>(this.node, peer, PROTOCOLS.metaPush, msg)
       } catch (err) {
         log.debug('push failed', { peer: id.slice(-8), error: String(err) })
+      }
+    }
+  }
+
+  private async relayPush(msg: PushMsg, sourcePeerId?: string): Promise<void> {
+    const seen = new Set<string>()
+    if (sourcePeerId) seen.add(sourcePeerId)
+    const primaryId = this.cluster.primaryPeer()?.toString()
+    if (primaryId) seen.add(primaryId)
+    const relays = new Set(this.cluster.relayPeers(this.opts.relayRoster).map((r) => r.peerId))
+
+    for (const conn of this.node.getConnections()) {
+      const peer = conn.remotePeer
+      const id = peer.toString()
+      if (seen.has(id) || relays.has(id)) continue
+      seen.add(id)
+      try {
+        await rpc<PushMsg, PushResp>(this.node, peer, PROTOCOLS.metaPush, msg)
+      } catch (err) {
+        log.debug('relay push failed', { peer: id.slice(-8), error: String(err) })
       }
     }
   }
@@ -775,12 +828,19 @@ export class ReplicationService {
     this.pullFull = false
     this.store.setMode('pull') // honor "verify before serve": stop serving while catching up
     try {
-      const primary = this.cluster.primaryPeer()
-      if (!primary) {
+      let sourcePeer: PeerId | undefined
+      if (!this.isRelay) {
+        const healthyRelay = this.cluster.relayPeers(this.opts.relayRoster).find((r) => r.peer)
+        if (healthyRelay) sourcePeer = healthyRelay.peer
+      }
+      if (!sourcePeer) {
+        sourcePeer = this.cluster.primaryPeer()
+      }
+      if (!sourcePeer) {
         this.retryPull()
         return
       }
-      const snap = await rpc<Record<string, never>, SnapshotResp>(this.node, primary, PROTOCOLS.snapshot, {})
+      const snap = await rpc<Record<string, never>, SnapshotResp>(this.node, sourcePeer, PROTOCOLS.snapshot, {})
       // Normal catch-up loads the snapshot only if it is ahead of us; a full reset
       // (triggered by a hash mismatch / corruption) discards local state and rebases
       // on the snapshot unconditionally.
@@ -789,7 +849,7 @@ export class ReplicationService {
         log.info('pull: loaded snapshot', { lsn: snap.lsn, full })
       }
       for (;;) {
-        const resp = await rpc<PullReq, PullResp>(this.node, primary, PROTOCOLS.metaPull, { haveLsn: this.store.lsn })
+        const resp = await rpc<PullReq, PullResp>(this.node, sourcePeer, PROTOCOLS.metaPull, { haveLsn: this.store.lsn })
         if (resp.error) throw new Error(resp.error)
         if (resp.ops.length > 0) {
           this.store.applyBatch(resp.ops, resp.toLsn, resp.latest ? resp.sha256 : undefined)
@@ -829,7 +889,7 @@ export class ReplicationService {
       return
     }
     // Replica receives pushes.
-    handle<PushMsg, PushResp>(this.node, PROTOCOLS.metaPush, async (msg) => {
+    handle<PushMsg, PushResp>(this.node, PROTOCOLS.metaPush, async (msg, ctx) => {
       if (this.isPrimary) return { status: 'ok', lsn: this.store.lsn }
       if (this.store.mode !== 'push' || this.store.lsn !== msg.fromLsn) {
         this.ensurePull(false)
@@ -837,6 +897,14 @@ export class ReplicationService {
       }
       try {
         this.store.applyBatch(msg.ops, msg.toLsn, msg.sha256)
+        if (this.metaLog) {
+          for (let i = 0; i < msg.ops.length; i++) {
+            this.metaLog.append(msg.fromLsn + i + 1, msg.ops[i], Date.now())
+          }
+        }
+        if (this.isRelay) {
+          void this.relayPush(msg, ctx.peer.toString())
+        }
         return { status: 'ok', lsn: this.store.lsn }
       } catch (err) {
         log.warn('push apply failed -> pull', { error: String(err) })
@@ -845,9 +913,11 @@ export class ReplicationService {
       }
     })
 
-    // Primary serves pulls.
+    // Primary or Relay serves pulls.
     handle<PullReq, PullResp>(this.node, PROTOCOLS.metaPull, async (req) => {
-      if (!this.isPrimary || !this.metaLog) return { ops: [], toLsn: req.haveLsn, latest: true, error: 'not-primary' }
+      if ((!this.isPrimary && !this.isRelay) || !this.metaLog) {
+        return { ops: [], toLsn: req.haveLsn, latest: true, error: 'not-primary-or-relay' }
+      }
       const entries = this.metaLog.read(req.haveLsn, this.opts.batchSize)
       if (entries.length === 0) {
         return { ops: [], toLsn: this.store.lsn, latest: true, sha256: this.store.sha256() }
@@ -857,17 +927,21 @@ export class ReplicationService {
       return { ops: entries.map((e) => e.op), toLsn, latest, sha256: latest ? this.store.sha256() : undefined }
     })
 
-    // Primary serves snapshots.
+    // Primary or Relay serves snapshots.
     handle<Record<string, never>, SnapshotResp>(this.node, PROTOCOLS.snapshot, async () => {
-      if (!this.isPrimary) return { lsn: 0, blob: '', error: 'not-primary' }
+      if (!this.isPrimary && !this.isRelay) return { lsn: 0, blob: '', error: 'not-primary-or-relay' }
       const { lsn, blob } = this.store.snapshot()
       return { lsn, blob: blob.toString('base64') }
     })
 
-    // Primary accepts forwarded write intents.
+    // Primary (or Relay forwarding to Primary) accepts forwarded write intents.
     handle<WriteIntent, WriteResult>(this.node, PROTOCOLS.metaWrite, async (intent) => {
-      if (!this.isPrimary) return { error: 'not-primary' }
-      return this.performIntent(intent)
+      if (this.isPrimary) return this.performIntent(intent)
+      const primary = this.cluster.primaryPeer()
+      if (primary) {
+        return rpc<WriteIntent, WriteResult>(this.node, primary, PROTOCOLS.metaWrite, intent, AbortSignal.timeout(12000))
+      }
+      return { error: 'not-primary' }
     })
   }
 }

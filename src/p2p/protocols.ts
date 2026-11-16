@@ -28,7 +28,8 @@ export const PROTOCOLS = {
   metaPull: '/p2pstore/meta-pull/1',
   snapshot: '/p2pstore/snapshot/1',
   contentPut: '/p2pstore/content-put/1',
-  contentGet: '/p2pstore/content-get/1'
+  contentGet: '/p2pstore/content-get/1',
+  checkpoint: '/p2pstore/checkpoint/1'
 } as const
 
 function encodeObj(obj: unknown): Uint8Array {

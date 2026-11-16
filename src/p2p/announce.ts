@@ -23,6 +23,8 @@ export interface AnnounceMsg {
   lsn: number
   usedBytes: number
   quotaBytes: number
+  /** Phase 8: Tiered role ('relay' | 'leaf' | 'auto'). */
+  tierRole?: 'relay' | 'leaf' | 'auto'
 }
 
 export interface PeerInfo extends AnnounceMsg {
@@ -36,7 +38,8 @@ export class ClusterView {
 
   constructor(
     private node: NodeHost,
-    private selfInfo: () => AnnounceMsg
+    private selfInfo: () => AnnounceMsg,
+    public readonly maxContainers: number = 1000
   ) {}
 
   start(intervalMs: number): void {
@@ -55,6 +58,15 @@ export class ClusterView {
 
   private update(msg: AnnounceMsg, peer?: PeerId): void {
     const prev = this.peers.get(msg.peerId)
+    if (!prev && this.peers.size >= this.maxContainers) {
+      log.warn('cluster capacity reached, ignoring peer announcement', {
+        peer: msg.peerId.slice(-8),
+        name: msg.name,
+        currentSize: this.peers.size,
+        maxContainers: this.maxContainers
+      })
+      return
+    }
     this.peers.set(msg.peerId, { ...msg, lastSeen: Date.now(), peer: peer ?? prev?.peer })
   }
 
@@ -108,5 +120,23 @@ export class ClusterView {
 
   all(): PeerInfo[] {
     return [...this.peers.values()]
+  }
+
+  get size(): number {
+    return this.peers.size
+  }
+
+  /** Phase 8: Filter peers that act as Tier-1 Relays. */
+  relayPeers(relayRoster: string[] = []): PeerInfo[] {
+    return this.all().filter((p) => {
+      if (relayRoster.length > 0) return relayRoster.includes(p.name)
+      return p.tierRole === 'relay' || p.role === 'anchor'
+    })
+  }
+
+  /** Phase 8: Filter peers that act as Tier-2 Leaves. */
+  leafPeers(relayRoster: string[] = []): PeerInfo[] {
+    const relays = new Set(this.relayPeers(relayRoster).map((p) => p.peerId))
+    return this.all().filter((p) => !relays.has(p.peerId) && !p.isPrimary)
   }
 }

@@ -794,6 +794,23 @@ Legend: each task lists **files** and an **acceptance test**.
 - **T7.5** `availability/service.ts` — Proactive rotation of healthy passive/active replicas (`ROTATION_INTERVAL_MS`, `ROTATION_BATCH`).
 - **Acceptance:** `test/phase7/run.mjs` verifies encryption framing, plaintext reads, read-repair on corrupted ciphertext, no data loss on active-node kill, admin auth gating, and metrics collection.
 
+### Phase 8 — Tiered Scaling & Periodic Checkpointing
+- **T8.1** `config.ts` & `config.default.json` — Comprehensive JSON configuration file loading (`CONFIG_FILE` or `config.json`), merging file defaults with environment overrides. Adds cluster capacity guard `MAX_CONTAINERS` (default 1,000) and Phase 8 knobs: `TIER_ENABLED`, `TIER_ROLE` (`relay` | `leaf` | `auto`), `TIER_SCALE_THRESHOLD`, `RELAY_ROSTER`, `CHECKPOINT_INTERVAL_HOURS`, `CHECKPOINT_RETENTION_DAYS`, `DELTA_LOG_RETENTION_OPS`.
+- **T8.2** `p2p/announce.ts` & `replication/service.ts` — Hierarchical Tiered Relay Fanout:
+  - Primary pushes metadata mutation batches exclusively to designated Tier-1 Relay nodes ($O(R)$ fanout, $R = 3 \sim 5$ anchors). Primary network egress complexity is $O(1)$ relative to total cluster size.
+  - Tier-1 Relay nodes verify monotonic LSN contiguity, apply mutations locally, append to local delta log, and fan out to their connected Tier-2 Leaf nodes.
+  - Leaf nodes apply batches and track replication watermarks. If a leaf node misses push batches, it pulls deltas from a healthy Relay node first, querying the Primary only as a final fallback.
+  - Leaf node write intents forward through Relay nodes to the Primary.
+- **T8.3** `metadata/checkpoint.ts` — Content-Addressed Periodic Checkpointing:
+  - `CheckpointService` produces zero-downtime snapshots of the metadata hierarchy (`store.snapshot()`).
+  - Snapshots are chunked, encrypted with AES-256-GCM, and stored directly in the distributed `ContentStore` under SHA-256 digests.
+  - Checkpoint records are published in the `checkpoints` catalog table (`lsn`, `chunk_hash`, `size`, `sha256`, `created_at`).
+  - Transaction log compaction: `metaLog.purge(oldestKeptLsn)` prunes historical operations prior to active checkpoints, bounding SQLite disk growth.
+- **T8.4** `metadata/store.ts` & `replication/service.ts` — Cold-Node Bootstrap & Incremental Log Replay:
+  - Newly joining containers and recovering nodes download the latest checkpoint chunk in parallel from peer content holders rather than requesting a heavy snapshot dump from the Primary.
+  - Nodes restore the base SQLite database to the checkpoint LSN and pull only the short remaining delta log slice from their nearest Tier-1 Relay.
+- **Acceptance:** `test/phase8/run.mjs` verifies multi-tier cluster fanout (Primary $\to$ Relay $\to$ Leaves), config file loading, cold-node bootstrap from checkpoint chunk, and live post-join updates. Unit tests `test/durability/config-file-unit.mjs` and `test/durability/checkpoint-unit.mjs` verify configuration parsing, snapshot chunking, and log purging.
+
 ---
 
 ## 18. Open technical decisions to confirm

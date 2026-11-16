@@ -82,6 +82,8 @@ export class AdminApi {
       // node's BOOTSTRAP_PEERS to dial this node across a network / mesh VPN.
       dialAddrs: d.node.getMultiaddrs().map((m) => m.toString()),
       usedBytes: d.content.usedBytes(),
+      maxContainers: d.cluster.maxContainers,
+      isRelay: d.replication.isRelay,
       peers: d.cluster.all().map((p) => ({
         name: p.name,
         peerId: p.peerId.slice(-8),

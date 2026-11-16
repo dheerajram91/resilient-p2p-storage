@@ -392,6 +392,8 @@ routed. *Exit:* an AI agent lists and reads files via MCP.
 
 **Phase 7 — Hardening.** Encryption at rest (per-chunk AES-256-GCM via `STORAGE_KEY`), scrypt password hashing + admin auth/ACL enforcement, Prometheus `/metrics` endpoint with monotonic counters, proactive passive rotation (`AvailabilityService`), and comprehensive acceptance testing. *Exit:* `npm run test:phase7` asserts encryption framing, plaintext reads, tampered ciphertext read-repair, survivor failover, admin Basic auth, and Prometheus metrics. ✅ done.
 
+**Phase 8 — Tiered Scaling & Periodic Checkpointing.** Configuration file support (`config.json`, `config.default.json`), cluster capacity guard `MAX_CONTAINERS` (default 1,000), Hierarchical Tiered Relay Fanout (Primary pushes to Tier-1 Relays, Relays fan out to Tier-2 Leaves), Content-Addressed Periodic Checkpointing (`CheckpointService` producing immutable SQLite snapshot chunks stored in `ContentStore`), cold-node bootstrap via checkpoint chunks, and circular transaction log pruning (`metaLog.purge`). *Exit:* `npm run test:phase8` asserts multi-tier fanout propagation, config file loading, cold-node bootstrap from checkpoint chunk, and live post-join updates. ✅ done.
+
 ---
 
 ## 11. Testing Strategy

@@ -29,6 +29,7 @@
     "test:phase6:docker": "node test/phase6/run.mjs",
     "test:phase7": "npm run build && node test/phase7/run.mjs",
     "test:phase7:docker": "node test/phase7/run.mjs",
+    "test:phase8": "npm run build && node test/phase8/run.mjs",
     "test:phase6:unit": "npm run build && node test/phase6/mcp-unit.mjs",
     "test:durability": "npm run build && node --test test/durability/*-unit.mjs && node --test test/durability/cluster.mjs",
     "docker:up": "docker compose -f deploy/docker-compose.yml up --build -d",

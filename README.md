@@ -94,6 +94,7 @@ Read-repair runs on reads, not as a scheduled integrity scrub.
 | **5.5** | Cross-network: `BOOTSTRAP_PEERS` dialing, persistent identity, `ANNOUNCE_MULTIADDRS`, mDNS toggle (mesh-VPN ready) | ✅ done |
 | **6** | MCP endpoint for AI agents (JSON-RPC over HTTP; same routing/ACL path as WebDAV) | ✅ done |
 | **7** | Hardening (encryption-at-rest, scrypt password hashing, admin auth & ACL enforcement, Prometheus metrics, proactive rotation) | ✅ done |
+| **8** | Tiered scaling & periodic checkpointing (config file support, max containers limit, hierarchical relay fanout, content-addressed snapshots) | ✅ done |
 
 ## Tech stack
 
@@ -296,6 +297,19 @@ Phase 7 delivers production-grade security, observability, and data resiliency:
 - **Prometheus metrics & observability:** Opt-in via `METRICS_ENABLED=true` (`METRICS_PORT`, default `9090`). Exposes a standard Prometheus `/metrics` text endpoint with gauges for stored chunks, bytes used, soft quota, peer connectivity by health state (`up`, `suspect`, `down`), metadata LSN, primary role, replication lag, and location states (`ok`, `degraded`, `replicating`), as well as monotonic counters for uploads, reads, repairs, relocations, and elections.
 - **Proactive active/backup rotation:** Configurable via `ROTATION_INTERVAL_MS` and `ROTATION_BATCH` (default `8`). Periodically swaps healthy active and backup chunk holders on the Primary, exercising both copies under real read traffic and preventing passive replica bit rot.
 
+## What Phase 8 adds — tiered scaling & periodic checkpointing
+
+Phase 8 enables the cluster to scale past 100+ nodes up to 1,000 nodes without exhausting the Primary:
+
+- **Unified Configuration File Support:** All node parameters can now be specified in a JSON configuration file (`config.json` or path via `CONFIG_FILE`), complete with sensible defaults and environment variable overrides. A reference `config.default.json` is provided in the repository root.
+- **Cluster Capacity Guard (`MAX_CONTAINERS`):** Configurable maximum container limit (default `1,000`). Guarded within gossip and membership discovery to maintain stable cluster operations.
+- **Hierarchical Tiered Relay Fanout:** When cluster size exceeds `TIER_SCALE_THRESHOLD` (default `100`) or when `TIER_ENABLED=true`, the cluster operates hierarchically:
+  - **Tier-0 (Primary):** Pushes transaction batches only to designated Tier-1 Relay nodes (`O(R)` fanout, typically 3 to 5 anchors). Network egress complexity on the Primary drops from $O(N)$ to $O(1)$.
+  - **Tier-1 (Relay Nodes):** Verify batches, apply locally, append to local transaction log, and fan out to their connected Tier-2 Leaf nodes.
+  - **Tier-2 (Leaf Nodes):** Receive pushes from their relay; fallback pulls route to relays first, querying Primary only as a last resort. Writes from leaf nodes forward transparently through relays to the Primary.
+- **Content-Addressed Periodic Checkpointing:** The Primary or Anchor node executes scheduled zero-downtime snapshots (`CHECKPOINT_INTERVAL_HOURS`, default `24`). The vacuumed SQLite database snapshot is chunked, encrypted, and stored directly in the cluster's distributed `ContentStore`.
+- **Accelerated Cold Bootstrap & Log Compaction:** Joining containers and recovering nodes download the nearest checkpoint chunk in parallel from peer content holders rather than requesting a large database dump from the Primary. Once restored, they replay only the subsequent delta log slice from their nearest Tier-1 Relay. Historical entries in `meta_log` prior to active checkpoints are automatically pruned, bounding SQLite disk growth.
+
 ## Run locally (no Docker)
 
 ```bash
@@ -440,10 +454,20 @@ Spawns a 3-node cluster with `STORAGE_KEY` set and verifies:
 - **Test F:** Setting `ADMIN_USERS` enforces HTTP Basic auth on the `/admin/*` API (unauthenticated requests and invalid passwords return `401`, valid credentials return `200`).
 - **Test F2:** Scrapes Prometheus `/metrics` on `METRICS_PORT`, verifying gauges and incrementing counters (`p2p_uploads_total`, `p2p_reads_total`).
 
-
+### Phase 8 acceptance test — tiered scaling & checkpoint bootstrap
 
 ```bash
-npm run docker:up      # docker compose up --build -d (anchor1 + node2 + node3)
+npm run test:phase8
+```
+
+Spawns a multi-tier cluster (Primary $\to$ Tier-1 Relay $\to$ Tier-2 Leaves) and verifies:
+- Configuration file loading (`config.json` / `CONFIG_FILE`) with env overrides.
+- Hierarchical push dissemination from Primary through Relays down to Leaf nodes.
+- Convergence across all tiers to identical LSN and SHA-256 without point-to-point Primary connections.
+- Cold node bootstrap from a content-addressed checkpoint chunk without Primary bottleneck.
+- Live post-bootstrap mutation propagation.
+
+### Run with Docker Compose
 # admin APIs are published on the host: anchor1=8081, node2=8082, node3=8083
 
 # run the same acceptance checks against the containers:
@@ -513,6 +537,15 @@ Run **one** node per machine (exactly one with `IS_PRIMARY=true` for v1). Two su
 | `MCP_REALM` | `WEBDAV_REALM` | Basic-auth realm shown to MCP clients |
 | `MCP_USERS` | `WEBDAV_USERS` | Accounts for MCP Basic auth (same format; defaults to the WebDAV table) |
 | `MCP_ALLOW_ANON` | `WEBDAV_ALLOW_ANON` | Allow unauthenticated MCP access where an ACL grants `*` |
+| `CONFIG_FILE` | _(empty)_ | Path to JSON config file (e.g. `config.json`), merging with env overrides |
+| `MAX_CONTAINERS` | `1000` | Maximum container/node capacity limit for cluster membership |
+| `TIER_ENABLED` | `false` | Enable hierarchical tiered relay dissemination |
+| `TIER_ROLE` | `auto` | Node tier role: `relay` (Tier-1), `leaf` (Tier-2), or `auto` |
+| `TIER_SCALE_THRESHOLD` | `100` | Node count threshold above which auto-tiering activates |
+| `RELAY_ROSTER` | _(empty)_ | Comma-separated list of node names acting as Tier-1 Relays |
+| `CHECKPOINT_INTERVAL_HOURS` | `24` | Interval in hours between automated metadata checkpoints |
+| `CHECKPOINT_RETENTION_DAYS` | `7` | Retention period in days for historical checkpoint chunks |
+| `DELTA_LOG_RETENTION_OPS` | `10000` | Operations retained in `meta_log` after checkpoint compaction |
 
 ## Layout
 
@@ -530,6 +563,7 @@ src/
     types.ts           op union + record types
     store.ts           node:sqlite store; apply(op); sha256(); snapshot/load
     log.ts             primary-only append-only meta log
+    checkpoint.ts      periodic content-addressed snapshots + log compaction
   content/
     chunker.ts         fixed-size content-addressed chunking + hashing
     store.ts           on-disk chunk store (2-level fan-out, integrity-verified)

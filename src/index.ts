@@ -17,6 +17,7 @@ import { createHost, type NodeHost } from './p2p/host.js'
 import { loadOrCreateIdentity } from './p2p/identity.js'
 import { MetadataStore } from './metadata/store.js'
 import { MetaLog } from './metadata/log.js'
+import { CheckpointService } from './metadata/checkpoint.js'
 import { ClusterView, type AnnounceMsg } from './p2p/announce.js'
 import { HealthDetector } from './p2p/health.js'
 import { ReplicationService } from './replication/service.js'
@@ -116,9 +117,10 @@ async function main(): Promise<void> {
     epoch: replicationRef?.epoch ?? 0,
     lsn: store.lsn,
     usedBytes: contentStore.usedBytes(),
-    quotaBytes: config.storageQuotaBytes
+    quotaBytes: config.storageQuotaBytes,
+    tierRole: config.tierRole
   })
-  const cluster = new ClusterView(node, selfInfo)
+  const cluster = new ClusterView(node, selfInfo, config.maxContainers)
 
   // Phase 3: turn the gossip view into explicit up/suspect/down liveness.
   const detector = new HealthDetector(node, cluster, {
@@ -134,9 +136,22 @@ async function main(): Promise<void> {
     batchSize: config.batchSize,
     name: config.name,
     voters: config.metadataVoters,
-    counters
+    counters,
+    tierEnabled: config.tierEnabled,
+    tierRole: config.tierRole,
+    tierScaleThreshold: config.tierScaleThreshold,
+    relayRoster: config.relayRoster
   })
   replicationRef = replication
+
+  const checkpointService = new CheckpointService(store, contentStore, metaLog, {
+    intervalHours: config.checkpointIntervalHours,
+    retentionDays: config.checkpointRetentionDays,
+    deltaLogRetentionOps: config.deltaLogRetentionOps
+  })
+  if (config.isPrimary || config.role === 'anchor') {
+    checkpointService.start()
+  }
 
   const contentTransfer = new ContentTransfer(node, contentStore)
   const content = new ContentService(node, contentStore, contentTransfer, store, replication, cluster, {
@@ -255,6 +270,7 @@ async function main(): Promise<void> {
     log.info('shutting down', { signal })
     clearInterval(timer)
     admin.stop()
+    checkpointService.stop()
     webdav?.stop()
     mcp?.stop()
     metrics?.stop()
