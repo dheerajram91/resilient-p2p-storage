@@ -1,0 +1,24 @@
+# Phase 4 capacity-management demo overlay.
+#
+#   docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.capacity-demo.yml up --build -d
+#
+# Shrinks each node's quota to 1 MiB (= 16 × 64 KiB chunks) so a ~1 MB file
+# visibly crosses the rebalance high-water mark, and disables the *periodic*
+# sweep so the demo can drive it deterministically via POST /admin/rebalance.
+# (In production REBALANCE_ENABLED stays true and the sweep runs on a timer.)
+
+name: p2p-storage
+
+services:
+  anchor1:
+    environment:
+      STORAGE_QUOTA_BYTES: 1048576
+      REBALANCE_ENABLED: "false"
+  node2:
+    environment:
+      STORAGE_QUOTA_BYTES: 1048576
+      REBALANCE_ENABLED: "false"
+  node3:
+    environment:
+      STORAGE_QUOTA_BYTES: 1048576
+      REBALANCE_ENABLED: "false"

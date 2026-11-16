@@ -1,0 +1,59 @@
+{
+  "name": "p2p-storage-node-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Peer-container distributed storage node agent (reference implementation)",
+  "main": "dist/index.js",
+  "bin": {
+    "node-agent": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test",
+    "test:phase1": "npm run build && node test/phase1/run.mjs",
+    "test:phase1:docker": "node test/phase1/run.mjs",
+    "test:phase2": "npm run build && node test/phase2/run.mjs",
+    "test:phase2:docker": "node test/phase2/run.mjs",
+    "test:phase3": "npm run build && node test/phase3/run.mjs",
+    "test:phase3:docker": "node test/phase3/run.mjs",
+    "test:phase4": "npm run build && node test/phase4/run.mjs",
+    "test:phase4:docker": "node test/phase4/run.mjs",
+    "test:phase5": "npm run build && node test/phase5/run.mjs",
+    "test:phase5:docker": "node test/phase5/run.mjs",
+    "test:phase5.5": "npm run build && node test/phase5.5/run.mjs",
+    "test:phase6": "npm run build && node test/phase6/run.mjs",
+    "test:phase6:docker": "node test/phase6/run.mjs",
+    "test:phase7": "npm run build && node test/phase7/run.mjs",
+    "test:phase7:docker": "node test/phase7/run.mjs",
+    "test:phase6:unit": "npm run build && node test/phase6/mcp-unit.mjs",
+    "test:durability": "npm run build && node --test test/durability/*-unit.mjs && node --test test/durability/cluster.mjs",
+    "docker:up": "docker compose -f deploy/docker-compose.yml up --build -d",
+    "docker:down": "docker compose -f deploy/docker-compose.yml down -v"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@chainsafe/libp2p-noise": "^16.0.0",
+    "@chainsafe/libp2p-yamux": "^7.0.0",
+    "@libp2p/bootstrap": "^11.0.47",
+    "@libp2p/crypto": "^5.1.21",
+    "@libp2p/identify": "^3.0.0",
+    "@libp2p/mdns": "^11.0.0",
+    "@libp2p/ping": "^2.0.0",
+    "@libp2p/tcp": "^10.0.0",
+    "it-length-prefixed": "^11.0.1",
+    "it-pipe": "^3.0.1",
+    "libp2p": "^2.0.0",
+    "uint8arrays": "^6.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

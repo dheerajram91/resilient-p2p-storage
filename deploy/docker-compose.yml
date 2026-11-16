@@ -1,0 +1,123 @@
+# Local multi-node harness: simulates several PCs on one host.
+# Each service is an independent node-agent container on a shared bridge network,
+# discovering peers over mDNS (bridge network approximates a LAN / mesh-VPN overlay).
+#
+#   docker compose -f deploy/docker-compose.yml up --build
+#
+# The admin/debug HTTP API of each node is published on a distinct host port
+# (8081/8082/8083) so the Phase 1 test harness can drive writes and read each
+# node's lsn + sha256 for convergence checks. The WebDAV mount surface (Phase 5)
+# is published on 8091/8092/8093 -> container 8090. The MCP endpoint (Phase 6)
+# is published on 8101/8102/8103 -> container 8100.
+#
+# On real PCs you would instead run ONE service per machine (see README).
+
+name: p2p-storage
+
+services:
+  anchor1:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      NODE_NAME: anchor1
+      METADATA_VOTERS: "anchor1,node2,node3"
+      NODE_ROLE: anchor
+      IS_PRIMARY: "true"
+      LISTEN_PORT: 4001
+      ADMIN_PORT: 8080
+      WEBDAV_ENABLED: "true"
+      WEBDAV_PORT: 8090
+      WEBDAV_USERS: "alice:secret:staff,bob:hunter2"
+      WEBDAV_ALLOW_ANON: "true"
+      MCP_ENABLED: "true"
+      MCP_PORT: 8100
+      DATA_DIR: /data
+      STORAGE_QUOTA_GB: 20
+      REPLICATION_FACTOR: 2
+      # Small chunk size so a modest demo file splits into several chunks on this
+      # single-host test cluster. Real deployments use the 4 MiB default.
+      CHUNK_SIZE_BYTES: 65536
+    ports:
+      - "8081:8080"
+      - "8091:8090"
+      - "8101:8100"
+    volumes:
+      - anchor1-content:/data/content
+      - anchor1-meta:/data/meta
+      - anchor1-snapshots:/data/snapshots
+      - anchor1-identity:/data/identity
+
+  node2:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      NODE_NAME: node2
+      METADATA_VOTERS: "anchor1,node2,node3"
+      NODE_ROLE: ordinary
+      LISTEN_PORT: 4001
+      ADMIN_PORT: 8080
+      WEBDAV_ENABLED: "true"
+      WEBDAV_PORT: 8090
+      WEBDAV_USERS: "alice:secret:staff,bob:hunter2"
+      WEBDAV_ALLOW_ANON: "true"
+      MCP_ENABLED: "true"
+      MCP_PORT: 8100
+      DATA_DIR: /data
+      STORAGE_QUOTA_GB: 20
+      REPLICATION_FACTOR: 2
+      CHUNK_SIZE_BYTES: 65536
+    ports:
+      - "8082:8080"
+      - "8092:8090"
+      - "8102:8100"
+    volumes:
+      - node2-content:/data/content
+      - node2-meta:/data/meta
+      - node2-snapshots:/data/snapshots
+      - node2-identity:/data/identity
+
+  node3:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      NODE_NAME: node3
+      METADATA_VOTERS: "anchor1,node2,node3"
+      NODE_ROLE: ordinary
+      LISTEN_PORT: 4001
+      ADMIN_PORT: 8080
+      WEBDAV_ENABLED: "true"
+      WEBDAV_PORT: 8090
+      WEBDAV_USERS: "alice:secret:staff,bob:hunter2"
+      WEBDAV_ALLOW_ANON: "true"
+      MCP_ENABLED: "true"
+      MCP_PORT: 8100
+      DATA_DIR: /data
+      STORAGE_QUOTA_GB: 20
+      REPLICATION_FACTOR: 2
+      CHUNK_SIZE_BYTES: 65536
+    ports:
+      - "8083:8080"
+      - "8093:8090"
+      - "8103:8100"
+    volumes:
+      - node3-content:/data/content
+      - node3-meta:/data/meta
+      - node3-snapshots:/data/snapshots
+      - node3-identity:/data/identity
+
+volumes:
+  anchor1-content:
+  anchor1-meta:
+  anchor1-snapshots:
+  anchor1-identity:
+  node2-content:
+  node2-meta:
+  node2-snapshots:
+  node2-identity:
+  node3-content:
+  node3-meta:
+  node3-snapshots:
+  node3-identity:
