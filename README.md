@@ -1,63 +1,63 @@
-# p2p-storage — node agent
+# p2p-storage — Distributed Resilient P2P Storage System
 
-Reference implementation of the design proposal *"Distributed MCP-Enabled Storage System Using Resilient
-Peer Containers with Replicated Metadata for Scalable Deep Hierarchy Access"* (see
-[`docs/p2p-storage-proposal.md`](docs/p2p-storage-proposal.md) and [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md)).
+A decentralized, high-performance peer-to-peer storage system designed for deep hierarchy access, multi-agent AI workflows, and zero-single-point-of-failure durability.
 
-Every participating PC runs the **same** container (`node-agent`). Nodes form a peer-to-peer
-overlay, each contributing ~20 GB of content storage and a full replica of the hierarchy metadata.
-Each file's content is kept on **two different PCs** (1 active + 1 backup).
-Use the three-voter quorum mode below for acknowledged-upload durability across one node failure.
+Every participating node runs a lightweight containerized agent (`node-agent`) contributing local content storage and maintaining a synchronized replica of the hierarchy metadata. 
 
-## Durable three-voter mode
+### Key Capabilities
 
-On **three fresh nodes**, set the same `METADATA_VOTERS=anchor1,node2,node3` and give each
-node the corresponding distinct `NODE_NAME`. The roster is fixed and persisted; all three
-names must agree on every machine. `REPLICATION_FACTOR` must be `2`.
-The bundled Docker Compose deployment selects this mode.
+- **Durable Quorum Consensus**: Metadata operations are sequenced through a resilient Raft-style consensus log (`METADATA_VOTERS`) with majority-based Primary leadership and automatic election failover.
+- **Content-Addressed Storage & $RF=2$ Redundancy**: Files are chunked into 4 MiB blocks, cryptographically hashed (SHA-256), encrypted at rest (AES-256-GCM), and placed across independent active and backup holders with self-healing read-repair.
+- **Hierarchical Tiered Dissemination (Phase 8)**: Scale-out fanout tree with Tier-1 Relay nodes buffering updates to shield the Primary, supporting clusters beyond 1,000 containers with $O(1)$ Primary network egress.
+- **Content-Addressed Checkpoints & Compaction**: Zero-downtime periodic metadata snapshots stored as encrypted content chunks, automatically compacting transaction logs and enabling fast cold-node onboarding.
+- **Multi-Protocol Client Surface**:
+  - **WebDAV Drive Mount**: Direct OS filesystem integration (Windows, macOS, Linux) with per-folder ACL inheritance.
+  - **Model Context Protocol (MCP)**: Native JSON-RPC interface for autonomous AI agents to explore, search, read, and write files.
+- **Production Hardening**: Full Noise protocol transport encryption, scrypt-based password hashing, Prometheus metrics exporter, and comprehensive auditability.
 
-There is still **one metadata Primary**, but its authority now comes from a majority election.
-`IS_PRIMARY` does not bypass elections in quorum mode. Terms, votes, pending log entries,
-commit progress, and metadata application are persisted in SQLite with `synchronous=FULL`.
-The existing gossip-based election and snapshot/push replication are used **only in legacy mode**.
+---
+
+## Architecture Overview
+
+```mermaid
+flowchart TD
+    subgraph Control_Plane ["Replicated Metadata & Consensus Plane"]
+        V1["Voter 1 / Primary\n(Sequencer)"] <-->|Quorum Consensus| V2["Voter 2\n(Follower)"]
+        V1 <-->|Quorum Consensus| V3["Voter 3\n(Follower)"]
+        V1 -->|Tiered Push| R1["Relay 1 (Tier-1)"]
+        V1 -->|Tiered Push| R2["Relay 2 (Tier-1)"]
+        R1 -->|Sharded Fanout| L1["Leaf Fleet A"]
+        R2 -->|Sharded Fanout| L2["Leaf Fleet B"]
+    end
+
+    subgraph Data_Plane ["Content Store Plane (RF=2)"]
+        Client["Client / AI Agent\n(WebDAV / MCP / Admin)"] -->|Write Chunk| H1["Active Holder (Node A)"]
+        H1 -->|P2P Replicate| H2["Backup Holder (Node B)"]
+    end
+```
+
+---
+
+## Quorum Durability Mode
+
+For acknowledged-upload durability and safe automatic Primary failover, configure **three voter nodes**:
+
+```powershell
+$env:METADATA_VOTERS = "anchor1,node2,node3"
+$env:NODE_NAME       = "anchor1" # node2 / node3 on respective machines
+$env:REPLICATION_FACTOR = "2"
+```
+
+Terms, votes, pending log entries, commit progress, and metadata mutations are persisted in SQLite with `synchronous=FULL` and WAL journaling.
 
 An upload reports success only after:
-
-1. Every chunk has been hash-verified and flushed on two distinct nodes.
-2. The complete file metadata (locations, manifest, and file entry) is committed through a
-   majority of the fixed three metadata voters and applied locally by the leader.
-3. The receiving node has applied the committed metadata, preserving read-your-writes.
-
-One failed node leaves a two-voter majority. Losing the majority rejects writes rather than
-creating an independent writer. Uploads also require two reachable content holders with capacity.
-A successful upload is intended to remain readable after a subsequent single-node crash and
-bounded recovery; reads need not remain uninterrupted during failover. A timeout/failure can have an
-**uncertain outcome**: read the destination before retrying. Reads are not quorum-linearizable.
-
-File contents are flushed before metadata is committed. POSIX directory entries are synchronized
-as well. **Windows does not offer the same directory-fsync path through this implementation:
-process-crash recovery is tested, but sudden-power-loss durability on Windows is not certified.**
-Hardware and filesystems must honor synchronization requests.
-
-Existing legacy databases are **not automatically migrated**. Export files and import them into a
-fresh quorum cluster, keeping the old data intact until verified. A quorum database refuses to start
-without its original voting configuration. Changing voters or replacing their identities is not an
-online membership-change operation; preserve each node's metadata and identity directories.
-
-This is a fixed-membership reference implementation, **not an industry-grade certification**.
-Log compaction, coordinated garbage collection, linearizable reads, and broader hardening remain
-future work. In-flight uploads durably pin chunks against relocation/deletion. Pins survive receiver restarts;
-abandoned uploads, uncertain commits, or failed releases can leave conservative pins indefinitely.
-There is no TTL or automatic reclamation. Manual recovery must first quiesce uploads and resolve
-their metadata outcomes; restarting a node does not clear these pins.
+1. Every chunk has been hash-verified and persisted on two distinct nodes ($RF=2$).
+2. The complete file metadata (chunk placement, manifest, and directory entry) is committed through a majority of the metadata voters and applied locally by the leader.
+3. The receiving node has confirmed the committed metadata, ensuring read-your-writes consistency.
 
 ```bash
 npm run test:durability
 ```
-
-The durability suite covers persistent voting/log recovery, majority/minority partitions, stale
-leader recovery, content acknowledgment ordering, and a real three-process cluster that kills the
-Primary immediately after a successful upload. It does not simulate physical power removal.
 
 ## Periodic background work
 

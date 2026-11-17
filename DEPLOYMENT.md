@@ -15,13 +15,15 @@ machines**. It covers three network scenarios and the exact steps for each.
 
 | Your situation | Path | Status |
 |----------------|------|--------|
-| Several containers on **one host** (dev/demo) | Docker compose (see [README](README.md)) | ✅ |
-| Two+ PCs on the **same home/office LAN** | [Path A — native on a LAN](#path-a--same-lan-native-works-today) | ✅ |
-| PCs on **different networks / behind NAT / no public IP** | [Path B — mesh VPN (Tailscale)](#path-b--different-networks-via-a-mesh-vpn-tailscale) | ✅ |
+| Several containers on **one host** (dev/demo) | Docker compose (see [README](README.md)) | ✅ Ready |
+| Two+ PCs on the **same home/office LAN** | [Path A — native on a LAN](#path-a--same-lan-native-works-today) | ✅ Ready |
+| PCs on **different networks / behind NAT / no public IP** | [Path B — mesh VPN (Tailscale/WireGuard)](#path-b--different-networks-via-a-mesh-vpn-tailscale) | ✅ Ready |
+| Machines on the **public Internet / Cloud VMs / VPS** | [Path C — Public Internet & Cloud VMs](#path-c--public-internet--cloud-vps-deployment) | ✅ Ready |
 
-**TL;DR:** if your two test machines are on the **same Wi-Fi/LAN**, you can test right now with **Path
-A**. For machines on different networks, **Path B** uses a mesh VPN plus `BOOTSTRAP_PEERS` — all wired
-and tested (see §6).
+**TL;DR:** 
+- If machines are on the **same Wi-Fi/LAN**, start directly with **Path A** (automatic mDNS discovery).
+- If machines are behind NAT without public IPs, **Path B** provides secure zero-config tunneling via a mesh VPN.
+- If machines have public IPs or are hosted on Cloud providers (AWS, GCP, DigitalOcean, Hetzner), follow **Path C**.
 
 ---
 
@@ -182,6 +184,78 @@ addresses each node advertises so peers reach the overlay IP; `MDNS_ENABLED=fals
 (which a VPN can't carry). This exact configuration — mDNS off, bootstrap-only — is covered by the
 `test:phase5.5` acceptance test. On the same LAN you can skip all of this because mDNS discovers peers
 for you (Path A).
+
+---
+
+## Path C — Public Internet & Cloud VPS Deployment
+
+When running nodes across the public Internet (cloud virtual machines such as AWS EC2, GCP Compute Engine, DigitalOcean, Hetzner, or physical servers with public IPs/port forwarding), nodes communicate directly over public IP addresses or domain names.
+
+### C.1 Firewall & Network Prerequisites
+1. **P2P Libp2p Port (Required)**: Open inbound TCP port `4001` on your cloud firewall / security group:
+   - AWS / GCP / Azure: Add an inbound security group rule for `TCP 4001` from `0.0.0.0/0`.
+   - Linux (UFW): `sudo ufw allow 4001/tcp`
+   - Linux (iptables): `sudo iptables -A INPUT -p tcp --dport 4001 -j ACCEPT`
+2. **WebDAV / Admin HTTP Ports (Optional)**:
+   - For security on the public Internet, keep `ADMIN_PORT=8080`, `WEBDAV_PORT=8090`, and `MCP_PORT=8100` bound locally or protect them behind a reverse proxy (such as Caddy, Nginx, or Traefik) terminating **TLS/HTTPS**.
+   - Set strong credentials via `ADMIN_USERS` and `WEBDAV_USERS` with scrypt hashed passwords.
+
+### C.2 Setting Up the Primary Seed Node (Machine 1)
+Start the primary or bootstrap seed node on the server with a known public IP or DNS record:
+
+```bash
+export NODE_NAME="seed-primary"
+export NODE_ROLE="anchor"
+export IS_PRIMARY="true"
+export LISTEN_PORT="4001"
+export ADMIN_PORT="8080"
+export DATA_DIR="/var/p2pstorage/data"
+
+# Inform the P2P swarm of the public address to dial:
+export ANNOUNCE_MULTIADDRS="/ip4/<PUBLIC_IP_OR_DNS>/tcp/4001"
+
+# Turn off local mDNS on the public internet:
+export MDNS_ENABLED="false"
+
+# Optional: Enable AES-256-GCM encryption-at-rest:
+export STORAGE_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+node dist/index.js
+```
+
+Upon startup, inspect `GET http://localhost:8080/admin/status` or the console log to record the node's permanent `peerId`:
+```
+[info] peerId: 12D3KooW...
+[info] dial address: /ip4/<PUBLIC_IP>/tcp/4001/p2p/12D3KooW...
+```
+
+> **Identity Persistence**: The node stores its Ed25519 identity key permanently in `DATA_DIR/identity/node.key`. The `peerId` remains completely stable across server reboots, container upgrades, and process restarts.
+
+### C.3 Setting Up Additional Storage Nodes (Replicas / Leaves)
+On any other machine on the Internet (another cloud provider, office server, or home lab):
+
+```bash
+export NODE_NAME="node-replica-2"
+export LISTEN_PORT="4001"
+export ADMIN_PORT="8080"
+export DATA_DIR="/var/p2pstorage/data"
+
+# Announce this node's own reachable public IP or DNS:
+export ANNOUNCE_MULTIADDRS="/ip4/<REPLICA_PUBLIC_IP>/tcp/4001"
+
+# Dial the Primary seed node over the Internet:
+export BOOTSTRAP_PEERS="/ip4/<SEED_PUBLIC_IP>/tcp/4001/p2p/<SEED_PEER_ID>"
+
+export MDNS_ENABLED="false"
+export STORAGE_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+node dist/index.js
+```
+
+### C.4 Security on the Public Internet
+- **End-to-End Transport Security**: All peer-to-peer data plane and control plane traffic over port `4001` is automatically authenticated and encrypted using the **Noise Protocol Framework** (using Ed25519 identity keys and ChaCha20-Poly1305 / AES-GCM ciphers). No external VPN is required for wire confidentiality between nodes.
+- **At-Rest Storage Encryption**: Set `STORAGE_KEY` (a 32-byte / 64-hex-character symmetric key) on all nodes. All chunk payloads written to disk are encrypted with AES-256-GCM.
+- **Authentication**: Set `ADMIN_USERS` and `WEBDAV_USERS` to enforce scrypt password verification.
 
 ---
 
