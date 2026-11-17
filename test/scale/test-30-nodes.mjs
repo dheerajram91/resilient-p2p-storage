@@ -62,7 +62,7 @@ async function getStatus(port) {
   return res.json()
 }
 
-async function uploadFile(port, filePath, buffer, maxRetries = 3) {
+async function uploadFile(port, filePath, buffer, maxRetries = 5) {
   let lastErr
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -78,16 +78,17 @@ async function uploadFile(port, filePath, buffer, maxRetries = 3) {
       return await res.json()
     } catch (err) {
       lastErr = err
+      const cause = err.cause ? ` (cause: ${err.cause.code || err.cause.message || err.cause})` : ''
       if (attempt < maxRetries) {
-        log(`upload ${filePath} attempt ${attempt} failed (${err.message}), retrying in 2s...`)
-        await sleep(2000)
+        log(`upload ${filePath} attempt ${attempt} failed (${err.message}${cause}), retrying in 3s...`)
+        await sleep(3000)
       }
     }
   }
   throw lastErr
 }
 
-async function readFile(port, filePath, maxRetries = 3) {
+async function readFile(port, filePath, maxRetries = 5) {
   let lastErr
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
@@ -97,9 +98,10 @@ async function readFile(port, filePath, maxRetries = 3) {
       return Buffer.from(arrayBuf)
     } catch (err) {
       lastErr = err
+      const cause = err.cause ? ` (cause: ${err.cause.code || err.cause.message || err.cause})` : ''
       if (attempt < maxRetries) {
-        log(`read ${filePath} attempt ${attempt} failed (${err.message}), retrying in 2s...`)
-        await sleep(2000)
+        log(`read ${filePath} attempt ${attempt} failed (${err.message}${cause}), retrying in 3s...`)
+        await sleep(3000)
       }
     }
   }
@@ -133,8 +135,13 @@ function spawnNode({ id, name, role, isPrimary, tierRole }) {
   const child = spawn(process.execPath, [ENTRY], { env, stdio: ['ignore', 'ignore', 'pipe'] })
   child.stderr.on('data', (d) => {
     const s = String(d)
-    if (s.includes('FATAL') || s.includes('Unhandled') || s.includes('uncaughtException')) {
-      console.error(`[${name}-err] ${s}`)
+    if (s.includes('FATAL') || s.includes('Unhandled') || s.includes('uncaughtException') || s.includes('ERR_') || s.includes('Error')) {
+      console.error(`[${name}-err] ${s.trim()}`)
+    }
+  })
+  child.on('exit', (code, sig) => {
+    if (code !== 0 && code !== null) {
+      console.error(`[${name}-exit] process exited unexpectedly with code ${code}, signal ${sig}`)
     }
   })
   children.push(child)

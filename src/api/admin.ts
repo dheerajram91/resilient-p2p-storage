@@ -59,6 +59,7 @@ export class AdminApi {
     this.server.requestTimeout = 0
     this.server.headersTimeout = 0
     this.server.keepAliveTimeout = 60000
+    this.server.setTimeout(0)
     this.server.listen(this.deps.port, () => {
       log.info('admin api listening', { port: this.deps.port })
       if (!this.deps.auth) log.warn('admin api is UNAUTHENTICATED — set ADMIN_USERS to require Basic auth')
