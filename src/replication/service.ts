@@ -334,7 +334,7 @@ export class ReplicationService {
       }
       if (!primary) return { error: 'no primary known yet', code: 'EUNAVAILABLE' }
       try {
-        result = await rpc<WriteIntent, WriteResult>(this.node, primary, PROTOCOLS.metaWrite, intent, AbortSignal.timeout(12000))
+        result = await rpc<WriteIntent, WriteResult>(this.node, primary, PROTOCOLS.metaWrite, intent, AbortSignal.timeout(45000))
       } catch (err) {
         return { error: `forward to primary failed (outcome uncertain): ${String(err)}`, code: 'EUNAVAILABLE' }
       }
@@ -385,12 +385,17 @@ export class ReplicationService {
   }
 
   /** Resolve once the local store has applied up to (at least) `lsn`, or on timeout. */
-  async waitForLocalLsn(lsn: number, timeoutMs = 8000): Promise<boolean> {
+  async waitForLocalLsn(lsn: number, timeoutMs = 30000): Promise<boolean> {
     if (this.store.lsn >= lsn) return true
     const deadline = Date.now() + timeoutMs
+    let triggeredPull = false
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, 20))
       if (this.store.lsn >= lsn) return true
+      if (!triggeredPull && Date.now() > deadline - timeoutMs + 1000) {
+        triggeredPull = true
+        this.ensurePull(false)
+      }
     }
     return this.store.lsn >= lsn
   }
@@ -792,17 +797,21 @@ export class ReplicationService {
     if (primaryId) seen.add(primaryId)
     const relays = new Set(this.cluster.relayPeers(this.opts.relayRoster).map((r) => r.peerId))
 
+    const targets: PeerId[] = []
     for (const conn of this.node.getConnections()) {
       const peer = conn.remotePeer
       const id = peer.toString()
       if (seen.has(id) || relays.has(id)) continue
       seen.add(id)
-      try {
-        await rpc<PushMsg, PushResp>(this.node, peer, PROTOCOLS.metaPush, msg)
-      } catch (err) {
-        log.debug('relay push failed', { peer: id.slice(-8), error: String(err) })
-      }
+      targets.push(peer)
     }
+
+    await Promise.allSettled(
+      targets.map((peer) =>
+        rpc<PushMsg, PushResp>(this.node, peer, PROTOCOLS.metaPush, msg, AbortSignal.timeout(10000))
+          .catch((err) => log.debug('relay push failed', { peer: peer.toString().slice(-8), error: String(err) }))
+      )
+    )
   }
 
   // ---- replica: pull (recovery / join) --------------------------------------
@@ -939,7 +948,7 @@ export class ReplicationService {
       if (this.isPrimary) return this.performIntent(intent)
       const primary = this.cluster.primaryPeer()
       if (primary) {
-        return rpc<WriteIntent, WriteResult>(this.node, primary, PROTOCOLS.metaWrite, intent, AbortSignal.timeout(12000))
+        return rpc<WriteIntent, WriteResult>(this.node, primary, PROTOCOLS.metaWrite, intent, AbortSignal.timeout(45000))
       }
       return { error: 'not-primary' }
     })
