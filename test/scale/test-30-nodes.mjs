@@ -62,24 +62,48 @@ async function getStatus(port) {
   return res.json()
 }
 
-async function uploadFile(port, filePath, buffer) {
-  const res = await fetch(`http://127.0.0.1:${port}/admin/file?path=${encodeURIComponent(filePath)}`, {
-    method: 'PUT',
-    headers: { 'content-type': 'application/octet-stream' },
-    body: buffer
-  })
-  if (!res.ok) {
-    const text = await res.text()
-    throw new Error(`Upload failed (${res.status}): ${text}`)
+async function uploadFile(port, filePath, buffer, maxRetries = 3) {
+  let lastErr
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/admin/file?path=${encodeURIComponent(filePath)}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: buffer
+      })
+      if (!res.ok) {
+        const text = await res.text()
+        throw new Error(`Upload failed (${res.status}): ${text}`)
+      }
+      return await res.json()
+    } catch (err) {
+      lastErr = err
+      if (attempt < maxRetries) {
+        log(`upload ${filePath} attempt ${attempt} failed (${err.message}), retrying in 2s...`)
+        await sleep(2000)
+      }
+    }
   }
-  return res.json()
+  throw lastErr
 }
 
-async function readFile(port, filePath) {
-  const res = await fetch(`http://127.0.0.1:${port}/admin/file?path=${encodeURIComponent(filePath)}`)
-  if (!res.ok) throw new Error(`Read failed (${res.status})`)
-  const arrayBuf = await res.arrayBuffer()
-  return Buffer.from(arrayBuf)
+async function readFile(port, filePath, maxRetries = 3) {
+  let lastErr
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/admin/file?path=${encodeURIComponent(filePath)}`)
+      if (!res.ok) throw new Error(`Read failed (${res.status})`)
+      const arrayBuf = await res.arrayBuffer()
+      return Buffer.from(arrayBuf)
+    } catch (err) {
+      lastErr = err
+      if (attempt < maxRetries) {
+        log(`read ${filePath} attempt ${attempt} failed (${err.message}), retrying in 2s...`)
+        await sleep(2000)
+      }
+    }
+  }
+  throw lastErr
 }
 
 function spawnNode({ id, name, role, isPrimary, tierRole }) {
@@ -205,9 +229,9 @@ async function main() {
   await waitClusterMesh(nodes, 2)
   await waitClusterConvergence(nodes, 25000, 'initial 30-node mesh formation')
 
-  // Generate data: default 32 files of 32 MiB each (total = 1,024 MB = 1 GB)
-  const FILE_COUNT = Number(process.env.FILE_COUNT || 32)
-  const FILE_SIZE_MB = Number(process.env.FILE_SIZE_MB || 32)
+  // Generate data: default 16 files of 64 MiB each (total = 1,024 MB = 1 GB)
+  const FILE_COUNT = Number(process.env.FILE_COUNT || 16)
+  const FILE_SIZE_MB = Number(process.env.FILE_SIZE_MB || 64)
   const FILE_SIZE_BYTES = FILE_SIZE_MB * 1024 * 1024
   const totalMb = FILE_COUNT * FILE_SIZE_MB
   log(`\n--- Step 2: Preparing ${totalMb} MB of Data (${FILE_COUNT} files × ${FILE_SIZE_MB} MB) ---`)
@@ -239,7 +263,7 @@ async function main() {
     // Rotate target node: send through leaf nodes (e.g. node 4..29)
     const targetNodeIndex = 4 + (i % (TOTAL_NODES - 4))
     const targetNode = nodes[targetNodeIndex]
-    log(`[${i + 1}/${FILE_COUNT}] uploading ${spec.path} (32 MB) via "${targetNode.name}" (port ${targetNode.adminPort})...`)
+    log(`[${i + 1}/${FILE_COUNT}] uploading ${spec.path} (${FILE_SIZE_MB} MB) via "${targetNode.name}" (port ${targetNode.adminPort})...`)
     const uploadRes = await uploadFile(targetNode.adminPort, spec.path, spec.buffer)
     if (!uploadRes.fileId) {
       throw new Error(`Upload returned error: ${JSON.stringify(uploadRes)}`)
